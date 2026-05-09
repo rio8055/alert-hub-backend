@@ -137,8 +137,11 @@ configured_origins = [item.strip() for item in settings.cors_origins.split(",") 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=configured_origins,
-    # Keep strict configured origins while allowing localhost/127.0.0.1 any port for local frontend dev.
-    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+    # Local dev (any port) + all Vercel deployment/preview hosts (*.vercel.app).
+    allow_origin_regex=(
+        r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"
+        r"|^https://[^/]+\.vercel\.app$"
+    ),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
