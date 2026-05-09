@@ -13,6 +13,7 @@ from app.api.accounts import router as accounts_router
 from app.api.notifications import router as notifications_router
 from app.api.profile import router as profile_router
 from app.api.push import router as push_router
+from app.api.test import router as test_router
 from app.api.telegram import router as telegram_router
 from app.core.config import settings
 from app.db.base import Base
@@ -149,6 +150,7 @@ app.include_router(notifications_router, prefix=settings.api_prefix)
 app.include_router(telegram_router, prefix=settings.api_prefix)
 app.include_router(accounts_router, prefix=settings.api_prefix)
 app.include_router(push_router, prefix=settings.api_prefix)
+app.include_router(test_router, prefix=settings.api_prefix)
 
 
 @app.get("/health")
