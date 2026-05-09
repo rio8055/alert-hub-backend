@@ -3,6 +3,10 @@
 .env.*
 !.env.example
 
+# Telegram / Telethon session files (never commit — equivalent to account access)
+telegram_sessions/
+*.session
+
 # Python
 __pycache__/
 *.py[cod]
