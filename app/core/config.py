@@ -1,4 +1,13 @@
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _strip_surrounding_quotes(value: str) -> str:
+    """Render / copy-paste often includes wrapping quotes in the value; browsers never send those."""
+    s = value.strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ('"', "'"):
+        return s[1:-1].strip()
+    return s
 
 
 class Settings(BaseSettings):
@@ -22,6 +31,13 @@ class Settings(BaseSettings):
     telegram_api_id: int | None = None
     telegram_api_hash: str = ""
     public_base_url: str = "http://localhost:8000"
+
+    @field_validator("database_url", "cors_origins", "public_base_url", mode="before")
+    @classmethod
+    def strip_wrapping_quotes(cls, v: object) -> object:
+        if isinstance(v, str):
+            return _strip_surrounding_quotes(v)
+        return v
 
 
 settings = Settings()
