@@ -134,19 +134,30 @@ MEDIA_DIR.mkdir(exist_ok=True)
 app.mount("/media", StaticFiles(directory=str(MEDIA_DIR)), name="media")
 
 configured_origins = [item.strip() for item in settings.cors_origins.split(",") if item.strip()]
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=configured_origins,
-    # Local dev (any port) + Vercel (*.vercel.app) + Render Web Services (*.onrender.com).
-    allow_origin_regex=(
-        r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"
-        r"|^https://[^/]+\.vercel\.app$"
-        r"|^https://[^/]+\.onrender\.com$"
-    ),
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+
+if settings.cors_allow_any_origin:
+    # Any browser origin can read responses (OK here: auth uses Bearer in header/localStorage, not cookies).
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+else:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=configured_origins,
+        # Local dev (any port) + Vercel (*.vercel.app) + Render Web Services (*.onrender.com).
+        allow_origin_regex=(
+            r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"
+            r"|^https://[^/]+\.vercel\.app$"
+            r"|^https://[^/]+\.onrender\.com$"
+        ),
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 app.include_router(auth_router, prefix=settings.api_prefix)
 app.include_router(profile_router, prefix=settings.api_prefix)

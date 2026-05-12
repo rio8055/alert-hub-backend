@@ -11,6 +11,9 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 15
     refresh_token_expire_days: int = 30
     cors_origins: str = "http://localhost:5173"
+    # If true: Access-Control-Allow-Origin: * and no credentialed CORS (fine for this app’s Bearer tokens in
+    # memory/localStorage; do not use with cookie-based sessions). Avoids chasing new frontend origins.
+    cors_allow_any_origin: bool = False
 
     vapid_public_key: str = ""
     vapid_private_key: str = ""
