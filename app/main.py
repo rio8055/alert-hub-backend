@@ -137,10 +137,11 @@ configured_origins = [item.strip() for item in settings.cors_origins.split(",") 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=configured_origins,
-    # Local dev (any port) + all Vercel deployment/preview hosts (*.vercel.app).
+    # Local dev (any port) + Vercel (*.vercel.app) + Render Web Services (*.onrender.com).
     allow_origin_regex=(
         r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"
         r"|^https://[^/]+\.vercel\.app$"
+        r"|^https://[^/]+\.onrender\.com$"
     ),
     allow_credentials=True,
     allow_methods=["*"],
