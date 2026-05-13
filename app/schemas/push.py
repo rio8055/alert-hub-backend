@@ -11,3 +11,7 @@ class PushPayload(BaseModel):
     body: str
     url: str = "/"
     tag: str | None = None
+
+
+class UnsubscribeRequest(BaseModel):
+    endpoint: str

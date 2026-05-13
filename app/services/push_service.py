@@ -7,6 +7,12 @@ from app.core.config import settings
 from app.models.push_subscription import PushSubscription
 
 
+def remove_subscription_by_endpoint(db: Session, endpoint: str) -> int:
+    deleted = db.query(PushSubscription).filter(PushSubscription.endpoint == endpoint).delete()
+    db.commit()
+    return int(deleted)
+
+
 def save_subscription(db: Session, subscription: dict) -> PushSubscription:
     existing = db.query(PushSubscription).filter(PushSubscription.endpoint == subscription["endpoint"]).first()
     if existing:
