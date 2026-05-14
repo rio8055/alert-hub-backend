@@ -10,8 +10,8 @@ from app.services.r2_storage import r2_get_media_bytes
 router = APIRouter()
 
 
-@router.get("/{path:path}")
-async def serve_media(path: str) -> Response | FileResponse:
+@router.get("/{path:path}", response_model=None)
+async def serve_media(path: str):
     if not path or path.startswith("/") or any(part == ".." for part in path.replace("\\", "/").split("/")):
         raise HTTPException(status_code=400, detail="Invalid path")
     safe = path.replace("\\", "/")
