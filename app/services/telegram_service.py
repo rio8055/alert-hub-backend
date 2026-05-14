@@ -1,5 +1,7 @@
 import asyncio
 import json
+import mimetypes
+import tempfile
 import time
 from pathlib import Path
 from uuid import uuid4
@@ -12,6 +14,12 @@ from app.core.config import settings
 from app.models.notification import Notification
 from app.models.telegram_account import TelegramAccount
 from app.services.push_service import push_new_message_to_all
+from app.services.r2_storage import (
+    ensure_telegram_session_from_r2,
+    push_telegram_session_to_r2,
+    r2_head_media_last_modified,
+    r2_put_media,
+)
 
 SESSIONS_DIR = Path("telegram_sessions")
 SESSIONS_DIR.mkdir(exist_ok=True)
@@ -102,6 +110,17 @@ async def _save_media_and_get_url(event, account_id: int) -> str | None:
     except Exception as exc:
         print(f"[telegram] media download failed for account {account_id}: {exc}")
         return None
+    rel = f"telegram/{account_id}/{filename}"
+    try:
+        if settings.r2_enabled:
+            body = target.read_bytes()
+            ct, _ = mimetypes.guess_type(filename)
+            await r2_put_media(rel, body, ct)
+            target.unlink(missing_ok=True)
+        else:
+            pass
+    except Exception as exc:
+        print(f"[telegram] media persist failed for account {account_id}: {exc}")
     base = settings.public_base_url.rstrip("/")
     return f"{base}/media/telegram/{account_id}/{filename}"
 
@@ -115,6 +134,7 @@ class TelegramListenerManager:
         self._tasks: dict[int, asyncio.Task] = {}
         self._running = False
         self._session_verified_at: dict[int, float] = {}
+        self._session_names: dict[int, str] = {}
 
     def _mark_account_disconnected_db(self, db_factory, account_id: int) -> None:
         self._session_verified_at.pop(account_id, None)
@@ -144,6 +164,24 @@ class TelegramListenerManager:
                 await client.disconnect()
             except Exception as exc:
                 print(f"[telegram] disconnect failed for account {account_id}: {exc}")
+        session_name = self._session_names.pop(account_id, None)
+        if session_name:
+            try:
+                await push_telegram_session_to_r2(session_name)
+            except Exception as exc:
+                print(f"[telegram] R2 session upload failed for {session_name}: {exc}")
+
+    async def _disconnect_ephemeral_client(self, owns: bool, client: TelegramClient, session_name: str) -> None:
+        if not owns:
+            return
+        try:
+            await client.disconnect()
+        except Exception as exc:
+            print(f"[telegram] ephemeral client disconnect: {exc}")
+        try:
+            await push_telegram_session_to_r2(session_name)
+        except Exception as exc:
+            print(f"[telegram] R2 session upload after ephemeral use failed: {exc}")
 
     async def _session_is_authorized(self, account: TelegramAccount) -> bool:
         client = self._clients.get(account.id)
@@ -153,6 +191,7 @@ class TelegramListenerManager:
             except Exception as exc:
                 print(f"[telegram] is_user_authorized failed for account {account.id}: {exc}")
                 return False
+        await ensure_telegram_session_from_r2(account.session_name)
         session_path = str(SESSIONS_DIR / account.session_name)
         ephemeral = TelegramClient(session_path, settings.telegram_api_id, settings.telegram_api_hash)
         await ephemeral.connect()
@@ -202,6 +241,7 @@ class TelegramListenerManager:
             return
         if account.id in self._clients:
             return
+        await ensure_telegram_session_from_r2(account.session_name)
         session_path = str(SESSIONS_DIR / account.session_name)
         client = TelegramClient(session_path, settings.telegram_api_id, settings.telegram_api_hash)
         try:
@@ -379,6 +419,7 @@ class TelegramListenerManager:
 
         self._clients[account.id] = client
         self._session_verified_at[account.id] = time.time()
+        self._session_names[account.id] = account.session_name
         self._tasks[account.id] = asyncio.create_task(client.run_until_disconnected())
 
     async def send_message(
@@ -394,6 +435,8 @@ class TelegramListenerManager:
             raise ValueError("Telegram API credentials are not configured")
         if not message_text.strip():
             raise ValueError("Message cannot be empty")
+
+        await ensure_telegram_session_from_r2(account.session_name)
 
         client = self._clients.get(account.id)
         owns_client = False
@@ -416,7 +459,7 @@ class TelegramListenerManager:
             reply_to=reply_to_message_id,
         )
         if owns_client:
-            await client.disconnect()
+            await self._disconnect_ephemeral_client(True, client, account.session_name)
 
         db_local: Session = db_factory()
         me = await client.get_me() if not owns_client else None
@@ -477,6 +520,8 @@ class TelegramListenerManager:
         if chat_id is None and not (peer and peer.strip()):
             raise ValueError("chat_id or peer is required")
 
+        await ensure_telegram_session_from_r2(account.session_name)
+
         client = self._clients.get(account.id)
         owns_client = False
         if client is None:
@@ -495,8 +540,7 @@ class TelegramListenerManager:
             entity = chat_id if chat_id is not None else peer
             edited = await client.edit_message(entity=entity, message=message_id, text=message_text.strip())
         finally:
-            if owns_client:
-                await client.disconnect()
+            await self._disconnect_ephemeral_client(owns_client, client, account.session_name)
 
         db_local: Session = db_factory()
         row = (
@@ -537,6 +581,8 @@ class TelegramListenerManager:
         if chat_id is None and not (peer and peer.strip()):
             raise ValueError("chat_id or peer is required")
 
+        await ensure_telegram_session_from_r2(account.session_name)
+
         client = self._clients.get(account.id)
         owns_client = False
         if client is None:
@@ -555,8 +601,7 @@ class TelegramListenerManager:
             entity = chat_id if chat_id is not None else peer
             await client.delete_messages(entity=entity, message_ids=[message_id], revoke=revoke)
         finally:
-            if owns_client:
-                await client.disconnect()
+            await self._disconnect_ephemeral_client(owns_client, client, account.session_name)
 
         db_local: Session = db_factory()
         deleted = (
@@ -587,6 +632,8 @@ class TelegramListenerManager:
         if chat_id is None and not (peer and peer.strip()):
             raise ValueError("chat_id or peer is required")
 
+        await ensure_telegram_session_from_r2(account.session_name)
+
         client = self._clients.get(account.id)
         owns_client = False
         if client is None:
@@ -605,8 +652,7 @@ class TelegramListenerManager:
             entity = chat_id if chat_id is not None else peer
             await client.pin_message(entity=entity, message=message_id, notify=notify)
         finally:
-            if owns_client:
-                await client.disconnect()
+            await self._disconnect_ephemeral_client(owns_client, client, account.session_name)
 
     async def send_media(
         self,
@@ -622,6 +668,8 @@ class TelegramListenerManager:
             raise ValueError("Telegram API credentials are not configured")
         if not media_bytes:
             raise ValueError("Media file is empty")
+
+        await ensure_telegram_session_from_r2(account.session_name)
 
         client = self._clients.get(account.id)
         owns_client = False
@@ -645,13 +693,22 @@ class TelegramListenerManager:
         local_name = f"{uuid4().hex}{ext}"
         local_path = account_dir / local_name
         local_path.write_bytes(media_bytes)
+        rel_out = f"telegram/{account.id}/outgoing/{local_name}"
         base = settings.public_base_url.rstrip("/")
         media_url = f"{base}/media/telegram/{account.id}/outgoing/{local_name}"
 
         entity = chat_id if chat_id is not None else peer
         sent = await client.send_file(entity=entity, file=str(local_path), caption=(caption or "").strip() or None)
+        if settings.r2_enabled:
+            try:
+                body = local_path.read_bytes()
+                ct, _ = mimetypes.guess_type(local_name)
+                await r2_put_media(rel_out, body, ct)
+                local_path.unlink(missing_ok=True)
+            except Exception as exc:
+                print(f"[telegram] R2 upload outgoing media failed: {exc}")
         if owns_client:
-            await client.disconnect()
+            await self._disconnect_ephemeral_client(True, client, account.session_name)
 
         db_local: Session = db_factory()
         sent_chat = getattr(sent, "chat", None)
@@ -690,14 +747,24 @@ class TelegramListenerManager:
         avatar_path = ACCOUNT_AVATARS_DIR / f"{account.id}.jpg"
         base = settings.public_base_url.rstrip("/")
         avatar_url = f"{base}/media/telegram/account_avatars/{account.id}.jpg"
-        # Cache for 1 hour to avoid downloading photo on every request.
-        if avatar_path.exists():
+        rel = f"telegram/account_avatars/{account.id}.jpg"
+
+        if settings.r2_enabled:
+            lm = await r2_head_media_last_modified(rel)
+            if lm is not None and time.time() - lm < 3600:
+                return avatar_url
+        elif avatar_path.exists():
             age = time.time() - avatar_path.stat().st_mtime
             if age < 3600:
                 return avatar_url
 
         if not settings.telegram_api_id or not settings.telegram_api_hash:
+            if settings.r2_enabled:
+                lm = await r2_head_media_last_modified(rel)
+                return avatar_url if lm is not None else None
             return avatar_url if avatar_path.exists() else None
+
+        await ensure_telegram_session_from_r2(account.session_name)
 
         client = self._clients.get(account.id)
         owns_client = False
@@ -708,23 +775,49 @@ class TelegramListenerManager:
             authorized = await client.is_user_authorized()
             if not authorized:
                 await client.disconnect()
+                if settings.r2_enabled:
+                    lm = await r2_head_media_last_modified(rel)
+                    return avatar_url if lm is not None else None
                 return avatar_url if avatar_path.exists() else None
             owns_client = True
 
+        tmp_path: str | None = None
         try:
             me = await client.get_me()
             if me is None:
+                if settings.r2_enabled:
+                    lm = await r2_head_media_last_modified(rel)
+                    return avatar_url if lm is not None else None
                 return avatar_url if avatar_path.exists() else None
-            downloaded = await client.download_profile_photo(me, file=str(avatar_path))
-            if downloaded:
+            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
+                tmp_path = tf.name
+            downloaded = await client.download_profile_photo(me, file=tmp_path)
+            tmp_file = Path(tmp_path)
+            if downloaded and tmp_file.exists() and tmp_file.stat().st_size > 0:
+                data = tmp_file.read_bytes()
+                if settings.r2_enabled:
+                    await r2_put_media(rel, data, "image/jpeg")
+                else:
+                    ACCOUNT_AVATARS_DIR.mkdir(parents=True, exist_ok=True)
+                    avatar_path.write_bytes(data)
                 return avatar_url
+            if settings.r2_enabled:
+                lm = await r2_head_media_last_modified(rel)
+                return avatar_url if lm is not None else None
             return avatar_url if avatar_path.exists() else None
         except Exception as exc:
             print(f"[telegram] failed to fetch account avatar for {account.id}: {exc}")
+            if settings.r2_enabled:
+                lm = await r2_head_media_last_modified(rel)
+                return avatar_url if lm is not None else None
             return avatar_url if avatar_path.exists() else None
         finally:
-            if owns_client:
-                await client.disconnect()
+            if tmp_path:
+                try:
+                    Path(tmp_path).unlink(missing_ok=True)
+                except OSError:
+                    pass
+            await self._disconnect_ephemeral_client(owns_client, client, account.session_name)
 
     async def mark_chat_read(
         self,
@@ -737,6 +830,8 @@ class TelegramListenerManager:
             raise ValueError("Telegram API credentials are not configured")
         if chat_id is None and not (peer and peer.strip()):
             raise ValueError("chat_id or peer is required")
+
+        await ensure_telegram_session_from_r2(account.session_name)
 
         client = self._clients.get(account.id)
         owns_client = False
@@ -756,8 +851,7 @@ class TelegramListenerManager:
             entity = chat_id if chat_id is not None else peer
             await client.send_read_acknowledge(entity=entity)
         finally:
-            if owns_client:
-                await client.disconnect()
+            await self._disconnect_ephemeral_client(owns_client, client, account.session_name)
 
         db_local: Session = db_factory()
         try:
@@ -786,13 +880,24 @@ class TelegramListenerManager:
             db_local.close()
 
     async def stop(self):
+        session_names = list(self._session_names.values())
         for client in self._clients.values():
-            await client.disconnect()
+            try:
+                await client.disconnect()
+            except Exception as exc:
+                print(f"[telegram] disconnect during shutdown: {exc}")
         for task in self._tasks.values():
-            task.cancel()
+            if not task.done():
+                task.cancel()
         self._clients.clear()
         self._tasks.clear()
+        self._session_names.clear()
         self._running = False
+        for name in dict.fromkeys(session_names):
+            try:
+                await push_telegram_session_to_r2(name)
+            except Exception as exc:
+                print(f"[telegram] R2 session upload on shutdown failed for {name}: {exc}")
 
 
 telegram_listener_manager = TelegramListenerManager()

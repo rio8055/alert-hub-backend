@@ -10,3 +10,4 @@ pydantic-settings
 email-validator
 telethon
 pywebpush
+boto3

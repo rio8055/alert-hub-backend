@@ -4,7 +4,6 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from sqlalchemy import inspect, text
 from sqlalchemy.exc import OperationalError
 
@@ -14,6 +13,7 @@ from app.api.notifications import router as notifications_router
 from app.api.profile import router as profile_router
 from app.api.push import router as push_router
 from app.api.test import router as test_router
+from app.api.media import router as media_router
 from app.api.telegram import router as telegram_router
 from app.core.config import settings
 from app.db.base import Base
@@ -129,9 +129,8 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
-MEDIA_DIR = Path("media")
-MEDIA_DIR.mkdir(exist_ok=True)
-app.mount("/media", StaticFiles(directory=str(MEDIA_DIR)), name="media")
+Path("media").mkdir(exist_ok=True)
+app.include_router(media_router, prefix="/media")
 
 configured_origins = [item.strip() for item in settings.cors_origins.split(",") if item.strip()]
 

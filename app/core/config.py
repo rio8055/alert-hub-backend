@@ -32,7 +32,21 @@ class Settings(BaseSettings):
     telegram_api_hash: str = ""
     public_base_url: str = "http://localhost:8000"
 
-    @field_validator("database_url", "cors_origins", "public_base_url", mode="before")
+    r2_endpoint_url: str = ""
+    r2_bucket_name: str = ""
+    r2_access_key_id: str = ""
+    r2_secret_access_key: str = ""
+
+    @property
+    def r2_enabled(self) -> bool:
+        return bool(
+            self.r2_endpoint_url.strip()
+            and self.r2_bucket_name.strip()
+            and self.r2_access_key_id.strip()
+            and self.r2_secret_access_key.strip()
+        )
+
+    @field_validator("database_url", "cors_origins", "public_base_url", "r2_endpoint_url", mode="before")
     @classmethod
     def strip_wrapping_quotes(cls, v: object) -> object:
         if isinstance(v, str):
