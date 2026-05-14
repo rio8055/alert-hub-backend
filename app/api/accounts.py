@@ -33,6 +33,7 @@ async def list_accounts(db: Session = Depends(get_db), _user=Depends(get_current
     rows = db.query(TelegramAccount).order_by(TelegramAccount.id.desc()).all()
     out = []
     for row in rows:
+        await telegram_listener_manager.sync_account_session_status(row, db)
         avatar_url = await telegram_listener_manager.get_account_avatar_url(row)
         out.append(_serialize(row, avatar_url=avatar_url))
     return out

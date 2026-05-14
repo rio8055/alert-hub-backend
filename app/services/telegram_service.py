@@ -21,6 +21,10 @@ ACCOUNT_AVATARS_DIR = MEDIA_DIR / "account_avatars"
 ACCOUNT_AVATARS_DIR.mkdir(parents=True, exist_ok=True)
 
 
+class TelegramSessionNotAuthorizedError(Exception):
+    """Telethon session file exists but is not logged in (expired, revoked, or missing on disk)."""
+
+
 def _reply_to_msg_id(message_obj) -> int | None:
     if message_obj is None:
         return None
@@ -103,10 +107,81 @@ async def _save_media_and_get_url(event, account_id: int) -> str | None:
 
 
 class TelegramListenerManager:
+    """How long to trust a successful Telegram auth check before re-verifying (per account)."""
+    _SESSION_VERIFY_TTL_SEC = 45.0
+
     def __init__(self) -> None:
         self._clients: dict[int, TelegramClient] = {}
         self._tasks: dict[int, asyncio.Task] = {}
         self._running = False
+        self._session_verified_at: dict[int, float] = {}
+
+    def _mark_account_disconnected_db(self, db_factory, account_id: int) -> None:
+        self._session_verified_at.pop(account_id, None)
+        db_local: Session = db_factory()
+        try:
+            acct = db_local.query(TelegramAccount).filter(TelegramAccount.id == account_id).first()
+            if acct and acct.is_connected:
+                acct.is_connected = False
+                db_local.commit()
+        finally:
+            db_local.close()
+
+    async def stop_account_listener(self, account_id: int) -> None:
+        self._session_verified_at.pop(account_id, None)
+        task = self._tasks.pop(account_id, None)
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                print(f"[telegram] listener task for account {account_id} ended: {exc}")
+        client = self._clients.pop(account_id, None)
+        if client is not None:
+            try:
+                await client.disconnect()
+            except Exception as exc:
+                print(f"[telegram] disconnect failed for account {account_id}: {exc}")
+
+    async def _session_is_authorized(self, account: TelegramAccount) -> bool:
+        client = self._clients.get(account.id)
+        if client is not None:
+            try:
+                return await client.is_user_authorized()
+            except Exception as exc:
+                print(f"[telegram] is_user_authorized failed for account {account.id}: {exc}")
+                return False
+        session_path = str(SESSIONS_DIR / account.session_name)
+        ephemeral = TelegramClient(session_path, settings.telegram_api_id, settings.telegram_api_hash)
+        await ephemeral.connect()
+        try:
+            return await ephemeral.is_user_authorized()
+        finally:
+            await ephemeral.disconnect()
+
+    async def sync_account_session_status(self, account: TelegramAccount, db: Session) -> None:
+        """If DB says connected, verify Telethon auth and persist disconnect when the session is invalid."""
+        if not settings.telegram_api_id or not settings.telegram_api_hash:
+            return
+        if not account.is_connected:
+            return
+
+        now = time.time()
+        if now - self._session_verified_at.get(account.id, 0) < self._SESSION_VERIFY_TTL_SEC:
+            return
+
+        ok = await self._session_is_authorized(account)
+        if ok:
+            self._session_verified_at[account.id] = now
+            return
+
+        await self.stop_account_listener(account.id)
+        acct = db.query(TelegramAccount).filter(TelegramAccount.id == account.id).first()
+        if acct and acct.is_connected:
+            acct.is_connected = False
+            db.commit()
 
     async def start(self, db_factory):
         if self._running or not settings.telegram_api_id or not settings.telegram_api_hash:
@@ -153,6 +228,7 @@ class TelegramListenerManager:
                 await client.disconnect()
             except Exception:
                 pass
+            self._mark_account_disconnected_db(db_factory, account.id)
             return
 
         @client.on(events.NewMessage)
@@ -302,6 +378,7 @@ class TelegramListenerManager:
             db_local.close()
 
         self._clients[account.id] = client
+        self._session_verified_at[account.id] = time.time()
         self._tasks[account.id] = asyncio.create_task(client.run_until_disconnected())
 
     async def send_message(
@@ -327,7 +404,9 @@ class TelegramListenerManager:
             authorized = await client.is_user_authorized()
             if not authorized:
                 await client.disconnect()
-                raise ValueError("Session is not authorized. Reconnect Telegram account.")
+                raise TelegramSessionNotAuthorizedError(
+                    "Session is not authorized. Reconnect Telegram account."
+                )
             owns_client = True
 
         entity = chat_id if chat_id is not None else peer
@@ -407,7 +486,9 @@ class TelegramListenerManager:
             authorized = await client.is_user_authorized()
             if not authorized:
                 await client.disconnect()
-                raise ValueError("Session is not authorized. Reconnect Telegram account.")
+                raise TelegramSessionNotAuthorizedError(
+                    "Session is not authorized. Reconnect Telegram account."
+                )
             owns_client = True
 
         try:
@@ -465,7 +546,9 @@ class TelegramListenerManager:
             authorized = await client.is_user_authorized()
             if not authorized:
                 await client.disconnect()
-                raise ValueError("Session is not authorized. Reconnect Telegram account.")
+                raise TelegramSessionNotAuthorizedError(
+                    "Session is not authorized. Reconnect Telegram account."
+                )
             owns_client = True
 
         try:
@@ -513,7 +596,9 @@ class TelegramListenerManager:
             authorized = await client.is_user_authorized()
             if not authorized:
                 await client.disconnect()
-                raise ValueError("Session is not authorized. Reconnect Telegram account.")
+                raise TelegramSessionNotAuthorizedError(
+                    "Session is not authorized. Reconnect Telegram account."
+                )
             owns_client = True
 
         try:
@@ -547,7 +632,9 @@ class TelegramListenerManager:
             authorized = await client.is_user_authorized()
             if not authorized:
                 await client.disconnect()
-                raise ValueError("Session is not authorized. Reconnect Telegram account.")
+                raise TelegramSessionNotAuthorizedError(
+                    "Session is not authorized. Reconnect Telegram account."
+                )
             owns_client = True
 
         ext = Path(media_filename or "").suffix.lower()
@@ -660,7 +747,9 @@ class TelegramListenerManager:
             authorized = await client.is_user_authorized()
             if not authorized:
                 await client.disconnect()
-                raise ValueError("Session is not authorized. Reconnect Telegram account.")
+                raise TelegramSessionNotAuthorizedError(
+                    "Session is not authorized. Reconnect Telegram account."
+                )
             owns_client = True
 
         try:

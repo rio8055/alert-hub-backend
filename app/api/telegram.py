@@ -16,9 +16,19 @@ from app.schemas.telegram import (
     TelegramVerifyCodeRequest,
 )
 from app.services.telegram_connect_service import send_code, verify_code
-from app.services.telegram_service import telegram_listener_manager
+from app.services.telegram_service import TelegramSessionNotAuthorizedError, telegram_listener_manager
 
 router = APIRouter(prefix="/telegram", tags=["telegram"])
+
+
+async def _raise_telegram_session_revoked(db: Session, account: TelegramAccount) -> None:
+    account.is_connected = False
+    db.commit()
+    await telegram_listener_manager.stop_account_listener(account.id)
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail="Telegram session is no longer valid. Reconnect the account.",
+    )
 
 
 @router.get("/accounts", response_model=list[TelegramAccountOut])
@@ -78,6 +88,7 @@ async def connect_verify_code(
     else:
         row.label = payload.display_name
         row.phone_number = payload.phone_number
+        row.is_connected = True
         db.commit()
         db.refresh(row)
     await telegram_listener_manager.add_account_listener(row, SessionLocal)
@@ -99,14 +110,17 @@ async def send_telegram_message(
     if payload.chat_id is None and not peer:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="chat_id or peer is required")
 
-    sent = await telegram_listener_manager.send_message(
-        account=account,
-        message_text=payload.message_text,
-        chat_id=payload.chat_id,
-        peer=peer,
-        reply_to_message_id=payload.reply_to_message_id,
-        db_factory=SessionLocal,
-    )
+    try:
+        sent = await telegram_listener_manager.send_message(
+            account=account,
+            message_text=payload.message_text,
+            chat_id=payload.chat_id,
+            peer=peer,
+            reply_to_message_id=payload.reply_to_message_id,
+            db_factory=SessionLocal,
+        )
+    except TelegramSessionNotAuthorizedError:
+        await _raise_telegram_session_revoked(db, account)
     return {"ok": True, "message_id": sent.external_message_id_int or sent.id}
 
 
@@ -132,15 +146,18 @@ async def send_telegram_media(
     if not media_bytes:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Media file is empty")
 
-    sent = await telegram_listener_manager.send_media(
-        account=account,
-        db_factory=SessionLocal,
-        media_bytes=media_bytes,
-        media_filename=media.filename,
-        caption=caption,
-        chat_id=chat_id,
-        peer=peer_clean,
-    )
+    try:
+        sent = await telegram_listener_manager.send_media(
+            account=account,
+            db_factory=SessionLocal,
+            media_bytes=media_bytes,
+            media_filename=media.filename,
+            caption=caption,
+            chat_id=chat_id,
+            peer=peer_clean,
+        )
+    except TelegramSessionNotAuthorizedError:
+        await _raise_telegram_session_revoked(db, account)
     return {"ok": True, "message_id": sent.external_message_id_int or sent.id}
 
 
@@ -159,12 +176,15 @@ async def mark_telegram_messages_read(
     if payload.chat_id is None and not peer:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="chat_id or peer is required")
 
-    marked = await telegram_listener_manager.mark_chat_read(
-        account=account,
-        db_factory=SessionLocal,
-        chat_id=payload.chat_id,
-        peer=peer,
-    )
+    try:
+        marked = await telegram_listener_manager.mark_chat_read(
+            account=account,
+            db_factory=SessionLocal,
+            chat_id=payload.chat_id,
+            peer=peer,
+        )
+    except TelegramSessionNotAuthorizedError:
+        await _raise_telegram_session_revoked(db, account)
     return {"ok": True, "marked": marked}
 
 
@@ -183,14 +203,17 @@ async def edit_telegram_message(
     if payload.chat_id is None and not peer:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="chat_id or peer is required")
 
-    edited = await telegram_listener_manager.edit_message(
-        account=account,
-        db_factory=SessionLocal,
-        message_id=payload.message_id,
-        message_text=payload.message_text,
-        chat_id=payload.chat_id,
-        peer=peer,
-    )
+    try:
+        edited = await telegram_listener_manager.edit_message(
+            account=account,
+            db_factory=SessionLocal,
+            message_id=payload.message_id,
+            message_text=payload.message_text,
+            chat_id=payload.chat_id,
+            peer=peer,
+        )
+    except TelegramSessionNotAuthorizedError:
+        await _raise_telegram_session_revoked(db, account)
     return {"ok": True, "notification_id": edited.id}
 
 
@@ -209,14 +232,17 @@ async def delete_telegram_message(
     if payload.chat_id is None and not peer:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="chat_id or peer is required")
 
-    deleted = await telegram_listener_manager.delete_message(
-        account=account,
-        db_factory=SessionLocal,
-        message_id=payload.message_id,
-        chat_id=payload.chat_id,
-        peer=peer,
-        revoke=payload.revoke,
-    )
+    try:
+        deleted = await telegram_listener_manager.delete_message(
+            account=account,
+            db_factory=SessionLocal,
+            message_id=payload.message_id,
+            chat_id=payload.chat_id,
+            peer=peer,
+            revoke=payload.revoke,
+        )
+    except TelegramSessionNotAuthorizedError:
+        await _raise_telegram_session_revoked(db, account)
     return {"ok": True, "deleted": deleted}
 
 
@@ -235,11 +261,14 @@ async def pin_telegram_message(
     if payload.chat_id is None and not peer:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="chat_id or peer is required")
 
-    await telegram_listener_manager.pin_message(
-        account=account,
-        message_id=payload.message_id,
-        chat_id=payload.chat_id,
-        peer=peer,
-        notify=payload.notify,
-    )
+    try:
+        await telegram_listener_manager.pin_message(
+            account=account,
+            message_id=payload.message_id,
+            chat_id=payload.chat_id,
+            peer=peer,
+            notify=payload.notify,
+        )
+    except TelegramSessionNotAuthorizedError:
+        await _raise_telegram_session_revoked(db, account)
     return {"ok": True}
