@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_user
 from app.db.session import SessionLocal, get_db
 from app.models.telegram_account import TelegramAccount
+from app.services.telegram_connect_service import send_code
 from app.services.telegram_service import telegram_listener_manager
 
 router = APIRouter(prefix="/accounts", tags=["accounts"])
@@ -57,8 +58,12 @@ async def account_action(
     elif action == "disconnect":
         row.is_connected = False
     elif action == "reconnect":
-        row.is_connected = True
-        await telegram_listener_manager.add_account_listener(row, SessionLocal)
+        if not row.phone_number:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Phone number required to reconnect",
+            )
+        await send_code(row.session_name, row.phone_number)
     else:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid action")
 
